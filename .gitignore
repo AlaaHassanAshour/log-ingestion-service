@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Production Build Output
+dist/
+
+# Environment Variables & Secrets
+.env
+.env.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing & Coverage
+coverage/
+.vitest/
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+.vscode/
