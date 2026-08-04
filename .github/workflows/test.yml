@@ -39,6 +39,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build TypeScript
+        run: npm run build
+
       - name: Run tests
         env:
           DATABASE_URL: postgres://loguser:logpass@localhost:5432/logdb

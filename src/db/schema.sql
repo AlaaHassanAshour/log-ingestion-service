@@ -1,5 +1,6 @@
 -- 1. تفعيل الإضافة الخاصة بالبحث النصي السريع (Trigram Matching)
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- 2. إنشاء الجدول الرئيسي المقسّم حسب التاريخ (Partitioned Table)
 CREATE TABLE IF NOT EXISTS logs (
@@ -46,3 +47,27 @@ CREATE INDEX IF NOT EXISTS idx_logs_service_ts ON logs (service, timestamp DESC)
 CREATE INDEX IF NOT EXISTS idx_logs_level_ts ON logs (level, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_attrs_gin ON logs USING GIN (attributes jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_logs_message_trgm ON logs USING GIN (message gin_trgm_ops);
+
+DROP FUNCTION IF EXISTS drop_old_log_partitions(INTEGER);
+
+CREATE OR REPLACE FUNCTION drop_old_log_partitions(retention_days INTEGER)
+RETURNS void AS $$
+DECLARE
+    partition_record RECORD;
+    cutoff_date DATE;
+BEGIN
+    cutoff_date := CURRENT_DATE - retention_days;
+
+    FOR partition_record IN
+        SELECT c.relname
+        FROM pg_inherits i
+        JOIN pg_class c ON c.oid = i.inhrelid
+        JOIN pg_class p ON p.oid = i.inhparent
+        WHERE p.relname = 'logs'
+          AND c.relname ~ '^logs_[0-9]{4}_[0-9]{2}_[0-9]{2}$'
+          AND to_date(replace(substring(c.relname FROM 6), '_', '-'), 'YYYY-MM-DD') < cutoff_date
+    LOOP
+        EXECUTE format('DROP TABLE IF EXISTS %I;', partition_record.relname);
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
