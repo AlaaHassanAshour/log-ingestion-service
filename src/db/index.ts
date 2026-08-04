@@ -1,8 +1,10 @@
 import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 const connectionString = process.env.DATABASE_URL || 'postgres://loguser:logpass@localhost:5432/logdb';
+const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const pool = new pg.Pool({
   connectionString,
@@ -14,7 +16,7 @@ export const pool = new pg.Pool({
 export async function initDb() {
   const client = await pool.connect();
   try {
-    const schemaPath = path.join(__dirname, 'schema.sql');
+    const schemaPath = path.join(dirname, 'schema.sql');
     const schemaSql = fs.readFileSync(schemaPath, 'utf8');
     await client.query(schemaSql);
     console.log('✅ Database schema and partitions initialized successfully.');
