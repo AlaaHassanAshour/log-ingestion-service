@@ -2,7 +2,6 @@ import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createHash } from 'crypto';
 
 const connectionString = process.env.DATABASE_URL || 'postgres://loguser:logpass@localhost:5432/logdb';
 const dirname = path.dirname(fileURLToPath(import.meta.url));

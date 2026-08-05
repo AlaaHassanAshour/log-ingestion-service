@@ -44,13 +44,6 @@ CREATE INDEX IF NOT EXISTS idx_logs_level_ts ON logs (level, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_attrs_gin ON logs USING GIN (attributes jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_logs_message_trgm ON logs USING GIN (message gin_trgm_ops);
 
-CREATE TABLE IF NOT EXISTS api_keys (
-    key_hash TEXT PRIMARY KEY,
-    can_ingest BOOLEAN NOT NULL DEFAULT false,
-    can_query BOOLEAN NOT NULL DEFAULT false,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 DROP FUNCTION IF EXISTS drop_old_log_partitions(INTEGER);
 
 CREATE OR REPLACE FUNCTION drop_old_log_partitions(retention_days INTEGER)
