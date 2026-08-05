@@ -12,15 +12,12 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
+  "type": "module",
   "dependencies": {
-    "@fastify/postgres": "^6.1.0",
     "@fastify/swagger": "^9.8.1",
     "@fastify/swagger-ui": "^6.1.1",
     "fastify": "^5.11.2",
-    "pg": "^8.22.0",
-    "zod": "^4.4.3",
-    "zod-to-json-schema": "^3.25.2"
+    "pg": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

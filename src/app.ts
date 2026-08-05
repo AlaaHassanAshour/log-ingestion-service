@@ -2,9 +2,25 @@ import Fastify from 'fastify';
 import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import { logRoutes } from './routes/logs.js';
+import { initDb } from './db/index.js';
 
 export async function buildApp() {
+  await initDb();
+
   const app = Fastify({ logger: false });
+
+  app.setErrorHandler((error, _request, reply) => {
+    const statusCode = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number'
+      ? error.statusCode
+      : 500;
+    const message = error instanceof Error ? error.message : 'Internal Server Error';
+
+    if (statusCode === 400) {
+      return reply.status(400).send({ error: message });
+    }
+
+    return reply.status(statusCode).send({ error: message });
+  });
 
   // 1. تسجيل إعدادات Swagger Core
   await app.register(fastifySwagger, {
@@ -38,7 +54,7 @@ export async function buildApp() {
     transformStaticCSP: (header) => header,
   });
 
-  // Health check endpoint
+  // Health only becomes reachable after initDb has succeeded.
   app.get('/health', {
     schema: {
       tags: ['System'],
