@@ -3,6 +3,7 @@ import fastifySwagger from '@fastify/swagger';
 import fastifySwaggerUi from '@fastify/swagger-ui';
 import { logRoutes } from './routes/logs.js';
 import { initDb } from './db/index.js';
+import { registerAuth } from './auth.js';
 
 export async function buildApp() {
   await initDb();
@@ -53,6 +54,8 @@ export async function buildApp() {
     staticCSP: true,
     transformStaticCSP: (header) => header,
   });
+
+  await registerAuth(app);
 
   // Health only becomes reachable after initDb has succeeded.
   app.get('/health', {

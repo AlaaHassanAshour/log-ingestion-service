@@ -273,8 +273,107 @@ function jsonLog(row: Record<string, unknown>) {
   };
 }
 
+const logBatchBodySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    logs: {
+      type: 'array',
+      description: 'Batch of structured log entries. A batch with one entry is valid.',
+      items: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          timestamp: { type: 'string' },
+          level: { type: 'string' },
+          service: { type: 'string' },
+          message: { type: 'string' },
+          attributes: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+const logQueryStringSchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    service: { type: 'string', description: 'Exact service-name match' },
+    level: { type: 'string', enum: ['debug', 'info', 'warn', 'error'], description: 'Exact log level match' },
+    since: { type: 'string', description: 'Inclusive start timestamp, for example 2026-07-20T14:00:00Z' },
+    until: { type: 'string', description: 'Exclusive end timestamp, for example 2026-07-20T15:00:00Z' },
+    q: { type: 'string', description: 'Case-insensitive substring match on message' },
+    limit: { type: 'integer', minimum: 1, maximum: 1000, default: 100 },
+    cursor: { type: 'string', description: 'Opaque cursor returned by a previous response' },
+    'attr.user_id': { type: 'string', description: 'Example attribute filter. You can also use attr.<key> manually.' },
+  },
+} as const;
+
+const aggregateQueryStringSchema = {
+  type: 'object',
+  additionalProperties: true,
+  required: ['since', 'until', 'bucket'],
+  properties: {
+    service: { type: 'string', description: 'Exact service-name match' },
+    level: { type: 'string', enum: ['debug', 'info', 'warn', 'error'], description: 'Exact log level match' },
+    since: { type: 'string', description: 'Inclusive aggregation start timestamp, for example 2026-07-20T14:00:00Z' },
+    until: { type: 'string', description: 'Exclusive aggregation end timestamp, for example 2026-07-20T15:00:00Z' },
+    bucket: { type: 'string', enum: ['1m', '5m', '1h', '1d'], description: 'Aggregation bucket size' },
+    group_by: { type: 'string', enum: ['service', 'level'], description: 'Optional grouping dimension' },
+    q: { type: 'string', description: 'Case-insensitive substring match on message' },
+    'attr.user_id': { type: 'string', description: 'Example attribute filter. You can also use attr.<key> manually.' },
+  },
+} as const;
+
 export async function logRoutes(app: FastifyInstance) {
-  app.post('/logs', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.post('/logs', {
+    schema: {
+      tags: ['Logs'],
+      summary: 'Ingest a batch of structured logs',
+      description: 'Accepts a logs array, validates each entry independently, and stores valid entries.',
+      body: logBatchBodySchema,
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            accepted: { type: 'number' },
+            rejected: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  index: { type: 'number' },
+                  reason: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        400: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            error: { type: 'string' },
+            accepted: { type: 'number' },
+            rejected: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  index: { type: 'number' },
+                  reason: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  }, async (request: FastifyRequest, reply: FastifyReply) => {
     const body = request.body;
     if (!isPlainObject(body) || !Array.isArray(body.logs)) {
       return reply.status(400).send({ accepted: 0, rejected: [{ index: -1, reason: 'request body must be an object with a logs array' }] });
@@ -311,7 +410,29 @@ export async function logRoutes(app: FastifyInstance) {
     return reply.status(200).send({ accepted: validLogs.length, rejected });
   });
 
-  app.get('/logs', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.get('/logs', {
+    schema: {
+      tags: ['Logs'],
+      summary: 'Query logs',
+      description: 'Search logs with freely combinable filters and cursor pagination.',
+      querystring: logQueryStringSchema,
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            logs: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            next_cursor: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          },
+        },
+        400: {
+          type: 'object',
+          properties: {
+            error: { type: 'string' },
+          },
+        },
+      },
+    },
+  }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as Record<string, unknown>;
     const filterResult = parseFilters(query, { requireRange: false });
     if (filterResult.error || !filterResult.filters) {
@@ -360,7 +481,38 @@ export async function logRoutes(app: FastifyInstance) {
     });
   });
 
-  app.get('/logs/aggregate', async (request: FastifyRequest, reply: FastifyReply) => {
+  app.get('/logs/aggregate', {
+    schema: {
+      tags: ['Logs'],
+      summary: 'Aggregate logs into time buckets',
+      description: 'Returns time-bucketed log counts with optional filtering and grouping.',
+      querystring: aggregateQueryStringSchema,
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            buckets: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  start: { type: 'string' },
+                  group: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+                  count: { type: 'number' },
+                },
+              },
+            },
+          },
+        },
+        400: {
+          type: 'object',
+          properties: {
+            error: { type: 'string' },
+          },
+        },
+      },
+    },
+  }, async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as Record<string, unknown>;
     const filterResult = parseFilters(query, { requireRange: true });
     if (filterResult.error || !filterResult.filters) {

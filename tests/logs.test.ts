@@ -9,6 +9,8 @@ describe('required log API contract', () => {
   const baseTimestamp = '2026-07-20T14:32:01.123Z';
 
   beforeAll(async () => {
+    delete process.env.AUTH_ENABLED;
+    delete process.env.LOADGEN_API_KEY;
     app = await buildApp();
     await app.ready();
   });
@@ -17,7 +19,6 @@ describe('required log API contract', () => {
     if (app) {
       await app.close();
     }
-    await pool.end();
   });
 
   it('GET /health returns ready status', async () => {
@@ -29,6 +30,7 @@ describe('required log API contract', () => {
   it('POST /logs accepts valid entries and rejects invalid entries by index', async () => {
     const response = await request(app.server)
       .post('/logs')
+      .set('Authorization', 'Bearer ignored-when-auth-disabled')
       .send({
         logs: [
           {
@@ -140,5 +142,86 @@ describe('required log API contract', () => {
         count: 1,
       },
     ]);
+  });
+});
+
+describe('optional API key authentication', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>;
+  const apiKey = `loadgen-key-${Date.now()}`;
+  const service = `auth-test-${Date.now()}`;
+
+  beforeAll(async () => {
+    process.env.AUTH_ENABLED = 'true';
+    process.env.LOADGEN_API_KEY = apiKey;
+    app = await buildApp();
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    delete process.env.AUTH_ENABLED;
+    delete process.env.LOADGEN_API_KEY;
+    if (app) {
+      await app.close();
+    }
+    await pool.end();
+  });
+
+  it('keeps GET /health unauthenticated when auth is enabled', async () => {
+    const response = await request(app.server).get('/health');
+
+    expect(response.status).toBe(200);
+  });
+
+  it('rejects missing credentials on data endpoints', async () => {
+    const response = await request(app.server).get('/logs');
+
+    expect(response.status).toBe(401);
+    expect(typeof response.body.error).toBe('string');
+  });
+
+  it('rejects malformed bearer credentials', async () => {
+    const response = await request(app.server)
+      .get('/logs')
+      .set('Authorization', apiKey);
+
+    expect(response.status).toBe(401);
+    expect(typeof response.body.error).toBe('string');
+  });
+
+  it('accepts the seeded bearer key for ingest and query', async () => {
+    const ingest = await request(app.server)
+      .post('/logs')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({
+        logs: [
+          {
+            timestamp: '2026-07-20T16:00:00.000Z',
+            level: 'info',
+            service,
+            message: 'authenticated ingest',
+            attributes: { user_id: 'seeded' },
+          },
+        ],
+      });
+
+    expect(ingest.status).toBe(200);
+    expect(ingest.body.accepted).toBe(1);
+
+    const query = await request(app.server)
+      .get('/logs')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .query({ service, 'attr.user_id': 'seeded' });
+
+    expect(query.status).toBe(200);
+    expect(query.body.logs).toHaveLength(1);
+  });
+
+  it('accepts X-API-Key as an additional credential transport', async () => {
+    const response = await request(app.server)
+      .get('/logs')
+      .set('X-API-Key', apiKey)
+      .query({ service });
+
+    expect(response.status).toBe(200);
   });
 });
