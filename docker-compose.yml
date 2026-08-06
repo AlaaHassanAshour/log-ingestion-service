@@ -6,7 +6,6 @@ services:
     environment:
       - PORT=8080
       - DATABASE_URL=postgres://loguser:logpass@db:5432/logdb
-      - AUTH_ENABLED=false
     deploy:
       resources:
         limits:
