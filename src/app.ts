@@ -43,9 +43,9 @@ export async function buildApp() {
     },
   });
 
-  // 2. تسجيل واجهة المستخدم Swagger UI (ستكون متاحة على /documentation)
+  // 2. تسجيل واجهة المستخدم Swagger UI (ستكون متاحة على /swagger)
   await app.register(fastifySwaggerUi, {
-    routePrefix: '/documentation',
+    routePrefix: '/swagger',
     uiConfig: {
       docExpansion: 'list',
       deepLinking: false,
