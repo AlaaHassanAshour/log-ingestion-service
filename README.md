@@ -188,7 +188,7 @@ The app defines `drop_old_log_partitions(retention_days)` in PostgreSQL and runs
 Swagger UI is available at:
 
 ```text
-http://localhost:8080/documentation
+http://localhost:8080/swagger
 ```
 
 Authentication, tenancy, and rate limiting are not implemented. With plain `docker compose up`, all required endpoints are unauthenticated and available to the load generator.
