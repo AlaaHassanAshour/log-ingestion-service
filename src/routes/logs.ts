@@ -227,7 +227,7 @@ function decodeCursor(rawCursor: unknown): { cursor?: Cursor; error?: string } {
   }
 }
 
-function addFilterSql(filters: QueryFilters, values: unknown[], conditions: string[]) {
+function addFilterSql(filters: QueryFilters, values: unknown[], conditions: string[], timeColumn = 'timestamp') {
   if (filters.service) {
     values.push(filters.service);
     conditions.push(`service = $${values.length}`);
@@ -240,12 +240,12 @@ function addFilterSql(filters: QueryFilters, values: unknown[], conditions: stri
 
   if (filters.since) {
     values.push(filters.since);
-    conditions.push(`timestamp >= $${values.length}`);
+    conditions.push(`${timeColumn} >= $${values.length}`);
   }
 
   if (filters.until) {
     values.push(filters.until);
-    conditions.push(`timestamp < $${values.length}`);
+    conditions.push(`${timeColumn} < $${values.length}`);
   }
 
   if (filters.q) {
@@ -259,6 +259,22 @@ function addFilterSql(filters: QueryFilters, values: unknown[], conditions: stri
     values.push(value);
     conditions.push(`attributes ->> $${keyParam} = $${values.length}`);
   }
+}
+
+function canUseMinuteRollup(filters: QueryFilters) {
+  return !filters.q && Object.keys(filters.attributes).length === 0;
+}
+
+function aggregateSourceTable(filters: QueryFilters, bucket: string) {
+  if (!canUseMinuteRollup(filters)) {
+    return 'logs';
+  }
+
+  if (bucket === '1h' || bucket === '1d') {
+    return 'log_rollups_hour';
+  }
+
+  return 'log_rollups_minute';
 }
 
 function jsonLog(row: Record<string, unknown>) {
@@ -426,11 +442,12 @@ export async function logRoutes(app: FastifyInstance) {
     const tuples = validLogs.map((log, index) => {
       const offset = index * 5;
       values.push(log.timestamp, log.level, log.service, log.message, JSON.stringify(log.attributes));
-      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::jsonb)`;
+      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::jsonb, false)`;
     });
 
     await pool.query(
-      `INSERT INTO logs (timestamp, level, service, message, attributes) VALUES ${tuples.join(', ')}`,
+      `INSERT INTO logs (timestamp, level, service, message, attributes, rollup_processed)
+       VALUES ${tuples.join(', ')}`,
       values,
     );
 
@@ -510,8 +527,6 @@ export async function logRoutes(app: FastifyInstance) {
   });
 
   app.get('/logs/aggregate', {
-
-
      schema: {
 
       tags: ['Logs'],
@@ -551,7 +566,6 @@ export async function logRoutes(app: FastifyInstance) {
         },
       },
     },
-  
   },async (request: FastifyRequest, reply: FastifyReply) => {
     const query = request.query as Record<string, unknown>;
     const filterResult = parseFilters(query, { requireRange: true });
@@ -585,10 +599,8 @@ export async function logRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'group_by must be service or level' });
     }
 
+    const sourceTable = aggregateSourceTable(filterResult.filters, bucketResult.value ?? '');
     const values: unknown[] = [];
-    const conditions: string[] = [];
-    addFilterSql(filterResult.filters, values, conditions);
-
     values.push(bucketInterval);
     const bucketParam = values.length;
     values.push(filterResult.filters.since);
@@ -597,21 +609,56 @@ export async function logRoutes(app: FastifyInstance) {
     const groupSelect = groupBy ? `${groupBy} AS grouped_value` : 'NULL::text AS grouped_value';
     const groupResultSelect = groupBy ? 'grouped_value AS "group"' : 'NULL AS "group"';
     const groupClause = groupBy ? ', grouped_value' : '';
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const result = await pool.query(
-      `WITH bucketed AS (
-         SELECT date_bin($${bucketParam}::interval, timestamp, $${originParam}::timestamptz) AS bucket_start,
-                ${groupSelect}
-         FROM logs
-         ${whereClause}
-       )
-       SELECT bucket_start AS start, ${groupResultSelect}, COUNT(*)::int AS count
-       FROM bucketed
-       GROUP BY bucket_start${groupClause}
-       ORDER BY bucket_start ASC${groupBy ? ', grouped_value ASC' : ''}`,
-      values,
-    );
+    let result;
+    if (sourceTable === 'logs') {
+      const conditions: string[] = [];
+      addFilterSql(filterResult.filters, values, conditions);
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      result = await pool.query(
+        `WITH bucketed AS (
+           SELECT date_bin($${bucketParam}::interval, timestamp, $${originParam}::timestamptz) AS bucket_start,
+                  ${groupSelect},
+                  1 AS count
+           FROM logs
+           ${whereClause}
+         )
+         SELECT bucket_start AS start, ${groupResultSelect}, COUNT(*)::int AS count
+         FROM bucketed
+         GROUP BY bucket_start${groupClause}
+         ORDER BY bucket_start ASC${groupBy ? ', grouped_value ASC' : ''}`,
+        values,
+      );
+    } else {
+      const rollupConditions: string[] = [];
+      addFilterSql(filterResult.filters, values, rollupConditions, 'bucket_start');
+      const pendingConditions: string[] = ['rollup_processed = false'];
+      addFilterSql(filterResult.filters, values, pendingConditions, 'timestamp');
+      const rollupWhereClause = rollupConditions.length > 0 ? `WHERE ${rollupConditions.join(' AND ')}` : '';
+      const pendingWhereClause = `WHERE ${pendingConditions.join(' AND ')}`;
+
+      result = await pool.query(
+        `WITH bucketed AS (
+           SELECT date_bin($${bucketParam}::interval, bucket_start, $${originParam}::timestamptz) AS bucket_start,
+                  ${groupSelect},
+                  count
+           FROM ${sourceTable}
+           ${rollupWhereClause}
+           UNION ALL
+           SELECT date_bin($${bucketParam}::interval, timestamp, $${originParam}::timestamptz) AS bucket_start,
+                  ${groupSelect},
+                  1 AS count
+           FROM logs
+           ${pendingWhereClause}
+         )
+         SELECT bucket_start AS start, ${groupResultSelect}, SUM(count)::int AS count
+         FROM bucketed
+         GROUP BY bucket_start${groupClause}
+         ORDER BY bucket_start ASC${groupBy ? ', grouped_value ASC' : ''}`,
+        values,
+      );
+    }
 
     return reply.status(200).send({
       buckets: result.rows.map((row) => ({
