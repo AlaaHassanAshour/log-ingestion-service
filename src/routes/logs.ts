@@ -1,6 +1,5 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { pool } from '../db/index.js';
-
+import { readPool, writePool } from '../db/index.js';
 const LEVELS = new Set(['debug', 'info', 'warn', 'error']);
 const MAX_FUTURE_MS = 5 * 60 * 1000;
 const DEFAULT_LIMIT = 100;
@@ -288,9 +287,8 @@ function jsonLog(row: Record<string, unknown>) {
     attributes: row.attributes ?? {},
   };
 }
+
 const logBatchBodySchema = {
-
-
   type: 'object',
   additionalProperties: false,
   properties: {
@@ -302,35 +300,21 @@ const logBatchBodySchema = {
         additionalProperties: true,
         properties: {
           timestamp: { type: 'string' },
-
           level: { type: 'string' },
-
           service: { type: 'string' },
-
           message: { type: 'string' },
-
           attributes: {
-
             type: 'object',
-
             additionalProperties: true,
-
           },
-
         },
-
       },
-
     },
-
   },
-
 } as const;
-
 
 const logQueryStringSchema = {
   type: 'object',
-
   additionalProperties: true,
   properties: {
     service: { type: 'string', description: 'Exact service-name match' },
@@ -340,10 +324,10 @@ const logQueryStringSchema = {
     q: { type: 'string', description: 'Case-insensitive substring match on message' },
     limit: { type: 'integer', minimum: 1, maximum: 1000, default: 100 },
     cursor: { type: 'string', description: 'Opaque cursor returned by a previous response' },
-
     'attr.user_id': { type: 'string', description: 'Example attribute filter. You can also use attr.<key> manually.' },
   },
 } as const;
+
 const aggregateQueryStringSchema = {
   type: 'object',
   additionalProperties: true,
@@ -359,313 +343,318 @@ const aggregateQueryStringSchema = {
     'attr.user_id': { type: 'string', description: 'Example attribute filter. You can also use attr.<key> manually.' },
   },
 } as const;
+
 export async function logRoutes(app: FastifyInstance) {
-  app.post('/logs',{
-
-     schema: {
-      tags: ['Logs'],
-      summary: 'Ingest a batch of structured logs',
-      description: 'Accepts a logs array, validates each entry independently, and stores valid entries.',
-      body: logBatchBodySchema,
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            accepted: { type: 'number' },
-            rejected: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-
-                  index: { type: 'number' },
-
-                  reason: { type: 'string' },
-
+  app.post(
+    '/logs',
+    {
+      schema: {
+        tags: ['Logs'],
+        summary: 'Ingest a batch of structured logs',
+        description: 'Accepts a logs array, validates each entry independently, and stores valid entries.',
+        body: logBatchBodySchema,
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              accepted: { type: 'number' },
+              rejected: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    index: { type: 'number' },
+                    reason: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          400: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              error: { type: 'string' },
+              accepted: { type: 'number' },
+              rejected: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    index: { type: 'number' },
+                    reason: { type: 'string' },
+                  },
                 },
               },
             },
           },
         },
-        400: {
-          type: 'object',
-          additionalProperties: true,
-          properties: {
-            error: { type: 'string' },
-            accepted: { type: 'number' },
-            rejected: {
-              type: 'array',
-              items: {
-                type: 'object',
-
-                properties: {
-
-                  index: { type: 'number' },
-
-                  reason: { type: 'string' },
-
-                },
-
-              },
-
-            },
-
-          },
-
-        },
-
       },
     },
-  }, async (request: FastifyRequest, reply: FastifyReply) => {
-    const body = request.body;
-    if (!isPlainObject(body) || !Array.isArray(body.logs)) {
-      return reply.status(400).send({ accepted: 0, rejected: [{ index: -1, reason: 'request body must be an object with a logs array' }] });
-    }
-
-    const validLogs: ValidLogInput[] = [];
-    const rejected: Array<{ index: number; reason: string }> = [];
-
-    body.logs.forEach((rawLog, index) => {
-      const result = validateLogEntry(rawLog);
-      if (result.log) {
-        validLogs.push(result.log);
-      } else {
-        rejected.push({ index, reason: result.reason ?? 'invalid log entry' });
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const body = request.body;
+      if (!isPlainObject(body) || !Array.isArray(body.logs)) {
+        return reply.status(400).send({
+          accepted: 0,
+          rejected: [{ index: -1, reason: 'request body must be an object with a logs array' }],
+        });
       }
-    });
 
-    if (validLogs.length === 0) {
-      return reply.status(400).send({ accepted: 0, rejected });
-    }
-//بناء استعلام الإدخال الجماعي المتعدد (Bulk Insert Dynamic SQL
-    const values: unknown[] = [];
-    const tuples = validLogs.map((log, index) => {
-      const offset = index * 5;
-      values.push(log.timestamp, log.level, log.service, log.message, JSON.stringify(log.attributes));
-      return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::jsonb, false)`;
-    });
+      const validLogs: ValidLogInput[] = [];
+      const rejected: Array<{ index: number; reason: string }> = [];
 
-    await pool.query(
-      `INSERT INTO logs (timestamp, level, service, message, attributes, rollup_processed)
-       VALUES ${tuples.join(', ')}`,
-      values,
-    );
+      body.logs.forEach((rawLog, index) => {
+        const result = validateLogEntry(rawLog);
+        if (result.log) {
+          validLogs.push(result.log);
+        } else {
+          rejected.push({ index, reason: result.reason ?? 'invalid log entry' });
+        }
+      });
 
-    return reply.status(200).send({ accepted: validLogs.length, rejected });
-  });
+      if (validLogs.length === 0) {
+        return reply.status(400).send({ accepted: 0, rejected });
+      }
 
-  app.get('/logs', {
+      const values: unknown[] = [];
+      const tuples = validLogs.map((log, index) => {
+        const offset = index * 5;
+        values.push(log.timestamp, log.level, log.service, log.message, JSON.stringify(log.attributes));
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::jsonb, false)`;
+      });
 
-     schema: {
-      tags: ['Logs'],
-      summary: 'Query logs',
-      description: 'Search logs with freely combinable filters and cursor pagination.',
-      querystring: logQueryStringSchema,
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            logs: { type: 'array', items: { type: 'object', additionalProperties: true } },
-            next_cursor: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-          },
-        },
-        400: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' },
-          },
-        },
-      },
+      await writePool.query(
+        `INSERT INTO logs (timestamp, level, service, message, attributes, rollup_processed)
+         VALUES ${tuples.join(', ')}`,
+        values,
+      );
+
+      return reply.status(200).send({ accepted: validLogs.length, rejected });
     },
-  },async (request: FastifyRequest, reply: FastifyReply) => {
-    const query = request.query as Record<string, unknown>;
-    const filterResult = parseFilters(query, { requireRange: false });
-    if (filterResult.error || !filterResult.filters) {
-      return reply.status(400).send({ error: filterResult.error });
-    }
+  );
 
-    const limitResult = parseLimit(query.limit);
-    if (limitResult.error || !limitResult.limit) {
-      return reply.status(400).send({ error: limitResult.error });
-    }
-
-    const cursorResult = decodeCursor(query.cursor);
-    if (cursorResult.error) {
-      return reply.status(400).send({ error: cursorResult.error });
-    }
-
-    const values: unknown[] = [];
-    const conditions: string[] = [];
-    addFilterSql(filterResult.filters, values, conditions);
-
-    if (cursorResult.cursor) {
-      values.push(cursorResult.cursor.timestamp);
-      const timestampParam = values.length;
-      values.push(cursorResult.cursor.id);
-      conditions.push(`(timestamp < $${timestampParam} OR (timestamp = $${timestampParam} AND id < $${values.length}))`);
-    }
-
-    values.push(limitResult.limit + 1);
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const result = await pool.query(
-      `SELECT id, timestamp, level, service, message, attributes
-       FROM logs
-       ${whereClause}
-       ORDER BY timestamp DESC, id DESC
-       LIMIT $${values.length}`,
-      values,
-    );
-
-    const hasMore = result.rows.length > limitResult.limit;
-    const rows = hasMore ? result.rows.slice(0, limitResult.limit) : result.rows;
-    const nextCursor = hasMore ? encodeCursor(rows[rows.length - 1]) : null;
-
-    return reply.status(200).send({
-      logs: rows.map(jsonLog),
-      next_cursor: nextCursor,
-    });
-  });
-
-  app.get('/logs/aggregate', {
-     schema: {
-
-      tags: ['Logs'],
-
-      summary: 'Aggregate logs into time buckets',
-
-      description: 'Returns time-bucketed log counts with optional filtering and grouping.',
-
-      querystring: aggregateQueryStringSchema,
-
-      response: {
-
-        200: {
-          type: 'object',
-          properties: {
-            buckets: {
-              type: 'array',
-              items: {
-                type: 'object',
-                properties: {
-                  start: { type: 'string' },
-
-                  group: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-
-                  count: { type: 'number' },
-
-                },
-              },
+  app.get(
+    '/logs',
+    {
+      schema: {
+        tags: ['Logs'],
+        summary: 'Query logs',
+        description: 'Search logs with freely combinable filters and cursor pagination.',
+        querystring: logQueryStringSchema,
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              logs: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              next_cursor: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+            },
+          },
+          400: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
             },
           },
         },
-        400: {
-          type: 'object',
-          properties: {
-            error: { type: 'string' },
-          },
-        },
       },
     },
-  },async (request: FastifyRequest, reply: FastifyReply) => {
-    const query = request.query as Record<string, unknown>;
-    const filterResult = parseFilters(query, { requireRange: true });
-    if (filterResult.error || !filterResult.filters) {
-      return reply.status(400).send({ error: filterResult.error });
-    }
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const query = request.query as Record<string, unknown>;
+      const filterResult = parseFilters(query, { requireRange: false });
+      if (filterResult.error || !filterResult.filters) {
+        return reply.status(400).send({ error: filterResult.error });
+      }
 
-    const bucketResult = singleValue(query.bucket, 'bucket');
-    if (bucketResult.error) {
-      return reply.status(400).send({ error: bucketResult.error });
-    }
+      const limitResult = parseLimit(query.limit);
+      if (limitResult.error || !limitResult.limit) {
+        return reply.status(400).send({ error: limitResult.error });
+      }
 
-    const bucketMap: Record<string, string> = {
-      '1m': '1 minute',
-      '5m': '5 minutes',
-      '1h': '1 hour',
-      '1d': '1 day',
-    };
-    const bucketInterval = bucketMap[bucketResult.value ?? ''];
-    if (!bucketInterval) {
-      return reply.status(400).send({ error: 'bucket must be one of 1m, 5m, 1h, or 1d' });
-    }
+      const cursorResult = decodeCursor(query.cursor);
+      if (cursorResult.error) {
+        return reply.status(400).send({ error: cursorResult.error });
+      }
 
-    const groupByResult = singleValue(query.group_by, 'group_by');
-    if (groupByResult.error) {
-      return reply.status(400).send({ error: groupByResult.error });
-    }
-
-    const groupBy = groupByResult.value;
-    if (groupBy !== undefined && groupBy !== 'service' && groupBy !== 'level') {
-      return reply.status(400).send({ error: 'group_by must be service or level' });
-    }
-
-    const sourceTable = aggregateSourceTable(filterResult.filters, bucketResult.value ?? '');
-    const values: unknown[] = [];
-    values.push(bucketInterval);
-    const bucketParam = values.length;
-    values.push(filterResult.filters.since);
-    const originParam = values.length;
-
-    const groupSelect = groupBy ? `${groupBy} AS grouped_value` : 'NULL::text AS grouped_value';
-    const groupResultSelect = groupBy ? 'grouped_value AS "group"' : 'NULL AS "group"';
-    const groupClause = groupBy ? ', grouped_value' : '';
-
-    let result;
-    if (sourceTable === 'logs') {
+      const values: unknown[] = [];
       const conditions: string[] = [];
       addFilterSql(filterResult.filters, values, conditions);
+
+      if (cursorResult.cursor) {
+        values.push(cursorResult.cursor.timestamp);
+        const timestampParam = values.length;
+        values.push(cursorResult.cursor.id);
+        conditions.push(`(timestamp < $${timestampParam} OR (timestamp = $${timestampParam} AND id < $${values.length}))`);
+      }
+
+      values.push(limitResult.limit + 1);
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
-      result = await pool.query(
-        `WITH bucketed AS (
-           SELECT date_bin($${bucketParam}::interval, timestamp, $${originParam}::timestamptz) AS bucket_start,
-                  ${groupSelect},
-                  1 AS count
-           FROM logs
-           ${whereClause}
-         )
-         SELECT bucket_start AS start, ${groupResultSelect}, COUNT(*)::int AS count
-         FROM bucketed
-         GROUP BY bucket_start${groupClause}
-         ORDER BY bucket_start ASC${groupBy ? ', grouped_value ASC' : ''}`,
+      const result = await readPool.query(
+        `SELECT id, timestamp, level, service, message, attributes
+         FROM logs
+         ${whereClause}
+         ORDER BY timestamp DESC, id DESC
+         LIMIT $${values.length}`,
         values,
       );
-    } else {
-      const rollupConditions: string[] = [];
-      addFilterSql(filterResult.filters, values, rollupConditions, 'bucket_start');
-      const pendingConditions: string[] = ['rollup_processed = false'];
-      addFilterSql(filterResult.filters, values, pendingConditions, 'timestamp');
-      const rollupWhereClause = rollupConditions.length > 0 ? `WHERE ${rollupConditions.join(' AND ')}` : '';
-      const pendingWhereClause = `WHERE ${pendingConditions.join(' AND ')}`;
 
-      result = await pool.query(
-        `WITH bucketed AS (
-           SELECT date_bin($${bucketParam}::interval, bucket_start, $${originParam}::timestamptz) AS bucket_start,
-                  ${groupSelect},
-                  count
-           FROM ${sourceTable}
-           ${rollupWhereClause}
-           UNION ALL
-           SELECT date_bin($${bucketParam}::interval, timestamp, $${originParam}::timestamptz) AS bucket_start,
-                  ${groupSelect},
-                  1 AS count
-           FROM logs
-           ${pendingWhereClause}
-         )
-         SELECT bucket_start AS start, ${groupResultSelect}, SUM(count)::int AS count
-         FROM bucketed
-         GROUP BY bucket_start${groupClause}
-         ORDER BY bucket_start ASC${groupBy ? ', grouped_value ASC' : ''}`,
-        values,
-      );
-    }
+      const hasMore = result.rows.length > limitResult.limit;
+      const rows = hasMore ? result.rows.slice(0, limitResult.limit) : result.rows;
+      const nextCursor = hasMore ? encodeCursor(rows[rows.length - 1]) : null;
 
-    return reply.status(200).send({
-      buckets: result.rows.map((row) => ({
-        start: row.start instanceof Date ? row.start.toISOString() : new Date(row.start).toISOString(),
-        group: row.group,
-        count: row.count,
-      })),
-    });
-  });
+      return reply.status(200).send({
+        logs: rows.map(jsonLog),
+        next_cursor: nextCursor,
+      });
+    },
+  );
+
+  app.get(
+    '/logs/aggregate',
+    {
+      schema: {
+        tags: ['Logs'],
+        summary: 'Aggregate logs into time buckets',
+        description: 'Returns time-bucketed log counts with optional filtering and grouping.',
+        querystring: aggregateQueryStringSchema,
+        response: {
+          200: {
+            type: 'object',
+            properties: {
+              buckets: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    start: { type: 'string' },
+                    group: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+                    count: { type: 'number' },
+                  },
+                },
+              },
+            },
+          },
+          400: {
+            type: 'object',
+            properties: {
+              error: { type: 'string' },
+            },
+          },
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const query = request.query as Record<string, unknown>;
+      const filterResult = parseFilters(query, { requireRange: true });
+      if (filterResult.error || !filterResult.filters) {
+        return reply.status(400).send({ error: filterResult.error });
+      }
+
+      const bucketResult = singleValue(query.bucket, 'bucket');
+      if (bucketResult.error) {
+        return reply.status(400).send({ error: bucketResult.error });
+      }
+
+      const bucketMap: Record<string, string> = {
+        '1m': '1 minute',
+        '5m': '5 minutes',
+        '1h': '1 hour',
+        '1d': '1 day',
+      };
+      const bucketInterval = bucketMap[bucketResult.value ?? ''];
+      if (!bucketInterval) {
+        return reply.status(400).send({ error: 'bucket must be one of 1m, 5m, 1h, or 1d' });
+      }
+
+      const groupByResult = singleValue(query.group_by, 'group_by');
+      if (groupByResult.error) {
+        return reply.status(400).send({ error: groupByResult.error });
+      }
+
+      const groupBy = groupByResult.value;
+      if (groupBy !== undefined && groupBy !== 'service' && groupBy !== 'level') {
+        return reply.status(400).send({ error: 'group_by must be service or level' });
+      }
+
+      const sourceTable = aggregateSourceTable(filterResult.filters, bucketResult.value ?? '');
+      const values: unknown[] = [bucketInterval, filterResult.filters.since];
+      const bucketParam = 1;
+      const originParam = 2;
+
+      const groupSelect = groupBy ? `${groupBy} AS grouped_value` : 'NULL::text AS grouped_value';
+      const groupResultSelect = groupBy ? 'grouped_value AS "group"' : 'NULL AS "group"';
+      const groupClause = groupBy ? ', grouped_value' : '';
+
+      let result;
+      if (sourceTable === 'logs') {
+        const conditions: string[] = [];
+        addFilterSql(filterResult.filters, values, conditions);
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+        result = await readPool.query(
+          `WITH bucketed AS (
+             SELECT date_bin($${bucketParam}::interval, timestamp, $${originParam}::timestamptz) AS bucket_start,
+                    ${groupSelect},
+                    1 AS count
+             FROM logs
+             ${whereClause}
+           )
+           SELECT bucket_start AS start, ${groupResultSelect}, COUNT(*)::int AS count
+           FROM bucketed
+           GROUP BY bucket_start${groupClause}
+           ORDER BY bucket_start ASC${groupBy ? ', grouped_value ASC' : ''}`,
+          values,
+        );
+      } else {
+        const rollupValues: unknown[] = [bucketInterval, filterResult.filters.since];
+        const rollupConditions: string[] = [];
+        addFilterSql(filterResult.filters, rollupValues, rollupConditions, 'bucket_start');
+
+        const pendingValues: unknown[] = [];
+        const pendingConditions: string[] = ['rollup_processed = false'];
+        addFilterSql(filterResult.filters, pendingValues, pendingConditions, 'timestamp');
+
+        const rollupWhereClause = rollupConditions.length > 0 ? `WHERE ${rollupConditions.join(' AND ')}` : '';
+        const pendingWhereClause = `WHERE ${pendingConditions.join(' AND ')}`;
+
+        // إعادة بناء الفهرسة للـ Pending query للدمج الآمن
+        const combinedValues = [...rollupValues];
+        const adjustedPendingConditions = pendingConditions.map((cond) => {
+          return cond.replace(/\$(\d+)/g, (_, num) => `$${Number(num) + combinedValues.length}`);
+        });
+
+        result = await readPool.query(
+          `WITH bucketed AS (
+             SELECT date_bin($${bucketParam}::interval, bucket_start, $${originParam}::timestamptz) AS bucket_start,
+                    ${groupSelect},
+                    count
+             FROM ${sourceTable}
+             ${rollupWhereClause}
+             UNION ALL
+             SELECT date_bin($${bucketParam}::interval, timestamp, $${originParam}::timestamptz) AS bucket_start,
+                    ${groupSelect},
+                    1 AS count
+             FROM logs
+             ${WHERE_CLAUSE_PENDING(adjustedPendingConditions)}
+           )
+           SELECT bucket_start AS start, ${groupResultSelect}, SUM(count)::int AS count
+           FROM bucketed
+           GROUP BY bucket_start${groupClause}
+           ORDER BY bucket_start ASC${groupBy ? ', grouped_value ASC' : ''}`,
+          [...combinedValues, ...pendingValues],
+        );
+      }
+
+      return reply.status(200).send({
+        buckets: result.rows.map((row) => ({
+          start: row.start instanceof Date ? row.start.toISOString() : new Date(row.start).toISOString(),
+          group: row.group,
+          count: Number(row.count),
+        })),
+      });
+    },
+  );
+}
+
+function WHERE_CLAUSE_PENDING(conditions: string[]) {
+  return conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 }
