@@ -170,6 +170,7 @@ Indexes:
 - `(level, timestamp DESC)` for level-filtered recent-log queries.
 - `GIN (attributes jsonb_path_ops)` for JSONB attribute storage.
 - `GIN (message gin_trgm_ops)` for case-insensitive substring search with `ILIKE`.
+- `log_rollups_minute` and `log_rollups_hour` store pre-aggregated counts by bucket, service, and level for the required aggregation endpoint.
 
 ## Attribute Storage Strategy
 
@@ -193,6 +194,8 @@ http://localhost:8080/swagger
 
 Authentication, tenancy, and rate limiting are not implemented. With plain `docker compose up`, all required endpoints are unauthenticated and available to the load generator.
 
+Pre-aggregated rollups are enabled by default. They are additive: raw logs remain the source of truth, and aggregation falls back to raw logs when filters require message or attribute-level detail.
+
 ## CI
 
 GitHub Actions runs:
@@ -205,22 +208,52 @@ The test suite exercises the required API contract in the default unauthenticate
 
 ## Performance Testing
 
-Measured load-generator results still need to be collected in the final deployment environment. The current implementation is structured for the target workload through batched inserts, PostgreSQL partitions, and query-pattern indexes, but final submission should include real numbers.
+Run the included load test against a running service:
 
-Recommended results to capture before submission:
+```bash
+docker compose up --build
+npm run load:test
+```
 
-- Test environment
-- Dataset size, including a run around 1,000,000 rows
-- Batch size
-- Sustained ingestion rate
-- Query rate during ingestion
-- Aggregation latency p50, p95, and p99
-- CPU and memory usage for app and PostgreSQL
-- Bottlenecks found and optimizations applied
+Useful knobs:
+
+```bash
+LOAD_TEST_TOTAL=1000000
+LOAD_TEST_BATCH_SIZE=1000
+LOAD_TEST_CONCURRENCY=20
+LOAD_TEST_BASE_URL=http://localhost:8080
+LOAD_TEST_OUTPUT=load-results.json
+```
+
+The script ingests logs through `POST /logs`, sends one aggregation request per second during ingestion, and writes measured ingestion throughput plus aggregation p50/p95/p99 to `load-results.json`.
+
+Measured local run:
+
+- Test date: 2026-08-11
+- Environment: Windows x64 host, Docker Compose app + PostgreSQL, Node.js v24.13.0 for the load generator
+- Dataset: 1,000,000 generated logs spanning 30 days
+- Batch size: 1,000 logs
+- Concurrency: 20 ingestion workers
+- Aggregation query rate: 1 request per second during ingestion
+- Aggregation query: `bucket=1h&group_by=service` over the full 30-day range
+- Accepted logs: 1,000,000
+- Dropped/failed ingestion batches: 0
+- Ingestion duration: 241.58 seconds
+- Ingestion rate: 4,139.46 logs/sec
+- Batch latency: p50 4,591.81 ms, p95 7,498.89 ms, p99 11,355.55 ms
+- Aggregation samples: 185 successful, 0 failed
+- Aggregation latency: p50 213.83 ms, p95 784.97 ms, p99 1,883.10 ms
+
+Bottlenecks and optimizations:
+
+- Initial raw-table aggregation over 1,000,000 rows measured p95 3,096.08 ms, which missed the 1 second target.
+- Adding minute rollups reduced aggregation p95 to 1,045.57 ms.
+- Adding hour rollups reduced aggregation p95 to 784.97 ms for the primary 1-hour aggregation query.
+- Ingestion throughput is below the 15,000 logs/sec target in this local environment. The main write-side cost is maintaining raw-log indexes plus minute/hour rollup upserts on every batch.
 
 ## Known Limitations
 
-- Daily partitions are prepared for today and the next two days only; older or far-future accepted timestamps go to the default partition.
-- No pre-aggregated rollup table is implemented yet.
+- Daily partitions are prepared for the previous 30 days through the next two days; far-future accepted timestamps go to the default partition.
+- Rollups accelerate service/level time-bucket aggregations, but queries with `q` or `attr.<key>` fall back to raw logs for correctness.
 - No authentication optional mode is implemented.
-- No published measured performance results are included yet.
+- Local ingestion throughput did not reach the 15,000 logs/sec target. Next improvements would be COPY-based ingestion, fewer write-time indexes, asynchronous rollup workers, or partition-local tuning.

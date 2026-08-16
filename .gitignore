@@ -11,6 +11,7 @@ dist/
 # Logs
 *.log
 npm-debug.log*
+load-results*.json
 
 # Testing & Coverage
 coverage/
