@@ -1,6 +1,7 @@
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- 1. إنشاء جدول السجلات الرئيسي المقسم
 CREATE TABLE IF NOT EXISTS logs (
     id UUID NOT NULL DEFAULT gen_random_uuid(),
     timestamp TIMESTAMPTZ NOT NULL,
@@ -8,15 +9,14 @@ CREATE TABLE IF NOT EXISTS logs (
     service VARCHAR(255) NOT NULL,
     message TEXT NOT NULL,
     attributes JSONB,
-    rollup_processed BOOLEAN NOT NULL DEFAULT true,
+    rollup_processed BOOLEAN NOT NULL DEFAULT false, -- تم التعديل إلى false
     PRIMARY KEY (timestamp, id)
 ) PARTITION BY RANGE (timestamp);
 
-ALTER TABLE logs
-ADD COLUMN IF NOT EXISTS rollup_processed BOOLEAN NOT NULL DEFAULT true;
-
+-- 2. القسم الافتراضي
 CREATE TABLE IF NOT EXISTS logs_default PARTITION OF logs DEFAULT;
 
+-- 3. دالة إنشاء الأقسام المحدثة
 CREATE OR REPLACE FUNCTION create_partition_if_not_exists(start_date DATE)
 RETURNS void AS $$
 DECLARE
@@ -29,6 +29,7 @@ BEGIN
     partition_name := 'logs_' || to_char(start_date, 'YYYY_MM_DD');
 
     IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = partition_name) THEN
+        -- نقل البيانات إن وجدت في Default Partition
         CREATE TEMP TABLE logs_partition_move AS
         SELECT *
         FROM logs_default
@@ -46,8 +47,9 @@ BEGIN
             end_str
         );
 
-        INSERT INTO logs (id, timestamp, level, service, message, attributes)
-        SELECT id, timestamp, level, service, message, attributes
+        -- نقل كافة الأعمدة بما فيها rollup_processed
+        INSERT INTO logs (id, timestamp, level, service, message, attributes, rollup_processed)
+        SELECT id, timestamp, level, service, message, attributes, rollup_processed
         FROM logs_partition_move;
 
         DROP TABLE logs_partition_move;
@@ -55,15 +57,22 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- إنشاء الأقسام لـ 30 يوم سابق و 3 أيام قادمة
 SELECT create_partition_if_not_exists(day::DATE)
-FROM generate_series(CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '2 days', INTERVAL '1 day') AS day;
+FROM generate_series(CURRENT_DATE - INTERVAL '30 days', CURRENT_DATE + INTERVAL '3 days', INTERVAL '1 day') AS day;
 
+-- 4. الفهارس (مُحسّنة بدون تكرار)
 CREATE INDEX IF NOT EXISTS idx_logs_service_ts ON logs (service, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_level_ts ON logs (level, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_attrs_gin ON logs USING GIN (attributes jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_logs_message_trgm ON logs USING GIN (message gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_logs_rollup_pending ON logs (timestamp, id) WHERE rollup_processed = false;
 
+-- فهرس جزئي واحد فقط مع حقول التجميع لدعم الـ Rollup Job
+CREATE INDEX IF NOT EXISTS idx_logs_unprocessed 
+ON logs (timestamp, id, service, level) 
+WHERE rollup_processed = false;
+
+-- 5. جداول التجميع (Rollups)
 CREATE TABLE IF NOT EXISTS log_rollups_minute (
     bucket_start TIMESTAMPTZ NOT NULL,
     service VARCHAR(255) NOT NULL,
@@ -86,8 +95,7 @@ CREATE TABLE IF NOT EXISTS log_rollups_hour (
 CREATE INDEX IF NOT EXISTS idx_rollups_hour_service_bucket ON log_rollups_hour (service, bucket_start);
 CREATE INDEX IF NOT EXISTS idx_rollups_hour_level_bucket ON log_rollups_hour (level, bucket_start);
 
-DROP FUNCTION IF EXISTS drop_old_log_partitions(INTEGER);
-
+-- 6. دالة حذف الأقسام القديمة
 CREATE OR REPLACE FUNCTION drop_old_log_partitions(retention_days INTEGER)
 RETURNS void AS $$
 DECLARE
