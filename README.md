@@ -229,7 +229,7 @@ The script ingests logs through `POST /logs`, sends one aggregation request per 
 
 Measured local run:
 
-- Test date: 2026-08-11
+- Test date: 2026-08-17
 - Environment: Windows x64 host, Docker Compose app + PostgreSQL, Node.js v24.13.0 for the load generator
 - Dataset: 1,000,000 generated logs spanning 30 days
 - Batch size: 1,000 logs
@@ -238,11 +238,11 @@ Measured local run:
 - Aggregation query: `bucket=1h&group_by=service` over the full 30-day range
 - Accepted logs: 1,000,000
 - Dropped/failed ingestion batches: 0
-- Ingestion duration: 241.58 seconds
-- Ingestion rate: 4,139.46 logs/sec
-- Batch latency: p50 4,591.81 ms, p95 7,498.89 ms, p99 11,355.55 ms
-- Aggregation samples: 185 successful, 0 failed
-- Aggregation latency: p50 213.83 ms, p95 784.97 ms, p99 1,883.10 ms
+- Ingestion duration: 199.75 seconds
+- Ingestion rate: 5,006.37 logs/sec
+- Batch latency: p50 3,806.11 ms, p95 5,998.59 ms, p99 7,718.99 ms, max 10,376.81 ms
+- Aggregation samples: 53 successful, 0 failed
+- Aggregation latency: p50 1,210.20 ms, p95 11,694.08 ms, p99 15,177.81 ms, max 15,177.81 ms
 
 Bottlenecks and optimizations:
 
