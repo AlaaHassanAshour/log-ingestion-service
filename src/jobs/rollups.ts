@@ -1,7 +1,7 @@
-import { pool } from '../db/index.js';
+import { writePool } from '../db/index.js';
 
-const DEFAULT_BATCH_SIZE = 5000;
-const DEFAULT_INTERVAL_MS = 1000;
+const DEFAULT_BATCH_SIZE = 50000;
+const DEFAULT_INTERVAL_MS = 100;
 
 function rollupBatchSize() {
   const parsed = Number(process.env.ROLLUP_BATCH_SIZE ?? DEFAULT_BATCH_SIZE);
@@ -14,7 +14,7 @@ function rollupIntervalMs() {
 }
 
 export async function processRollupBatch() {
-  const client = await pool.connect();
+  const client = await writePool.connect();
   try {
     await client.query('BEGIN');
 

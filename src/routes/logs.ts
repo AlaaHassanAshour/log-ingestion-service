@@ -1,9 +1,11 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { readPool, writePool } from '../db/index.js';
+import { readPool } from '../db/index.js';
+import { ingestLogsWithCopy } from '../db/logCommands.js';
 const LEVELS = new Set(['debug', 'info', 'warn', 'error']);
 const MAX_FUTURE_MS = 5 * 60 * 1000;
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 1000;
+const HOT_ATTRIBUTE_KEYS = new Set(['user_id', 'region', 'request_id']);
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type AttributeValue = string | number | boolean;
@@ -253,10 +255,15 @@ function addFilterSql(filters: QueryFilters, values: unknown[], conditions: stri
   }
 
   for (const [key, value] of Object.entries(filters.attributes)) {
-    values.push(key);
-    const keyParam = values.length;
-    values.push(value);
-    conditions.push(`attributes ->> $${keyParam} = $${values.length}`);
+    if (HOT_ATTRIBUTE_KEYS.has(key)) {
+      values.push(value);
+      conditions.push(`attributes ->> '${key}' = $${values.length}`);
+    } else {
+      values.push(key);
+      const keyParam = values.length;
+      values.push(value);
+      conditions.push(`attributes ->> $${keyParam} = $${values.length}`);
+    }
   }
 }
 
@@ -416,18 +423,7 @@ export async function logRoutes(app: FastifyInstance) {
         return reply.status(400).send({ accepted: 0, rejected });
       }
 
-      const values: unknown[] = [];
-      const tuples = validLogs.map((log, index) => {
-        const offset = index * 5;
-        values.push(log.timestamp, log.level, log.service, log.message, JSON.stringify(log.attributes));
-        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}::jsonb, false)`;
-      });
-
-      await writePool.query(
-        `INSERT INTO logs (timestamp, level, service, message, attributes, rollup_processed)
-         VALUES ${tuples.join(', ')}`,
-        values,
-      );
+      await ingestLogsWithCopy(validLogs);
 
       return reply.status(200).send({ accepted: validLogs.length, rejected });
     },
@@ -614,9 +610,7 @@ export async function logRoutes(app: FastifyInstance) {
         addFilterSql(filterResult.filters, pendingValues, pendingConditions, 'timestamp');
 
         const rollupWhereClause = rollupConditions.length > 0 ? `WHERE ${rollupConditions.join(' AND ')}` : '';
-        const pendingWhereClause = `WHERE ${pendingConditions.join(' AND ')}`;
 
-        // إعادة بناء الفهرسة للـ Pending query للدمج الآمن
         const combinedValues = [...rollupValues];
         const adjustedPendingConditions = pendingConditions.map((cond) => {
           return cond.replace(/\$(\d+)/g, (_, num) => `$${Number(num) + combinedValues.length}`);
@@ -634,7 +628,7 @@ export async function logRoutes(app: FastifyInstance) {
                     ${groupSelect},
                     1 AS count
              FROM logs
-             ${WHERE_CLAUSE_PENDING(adjustedPendingConditions)}
+             ${whereClause(adjustedPendingConditions)}
            )
            SELECT bucket_start AS start, ${groupResultSelect}, SUM(count)::int AS count
            FROM bucketed
@@ -655,6 +649,6 @@ export async function logRoutes(app: FastifyInstance) {
   );
 }
 
-function WHERE_CLAUSE_PENDING(conditions: string[]) {
+function whereClause(conditions: string[]) {
   return conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 }
