@@ -158,25 +158,37 @@ CREATE TABLE logs (
   service VARCHAR(255) NOT NULL,
   message TEXT NOT NULL,
   attributes JSONB,
+  rollup_processed BOOLEAN NOT NULL DEFAULT false,
   PRIMARY KEY (timestamp, id)
 ) PARTITION BY RANGE (timestamp);
 ```
 
-Daily partitions are created for the current day and the next two days at startup. A default partition catches data outside those ranges, which keeps ingestion reliable even if a timestamp lands outside the prepared partitions.
+Daily partitions are created for the previous 30 days through the next two days at startup. A default partition catches data outside those ranges, which keeps ingestion reliable even if a timestamp lands outside the prepared partitions.
 
 Indexes:
 
 - `(service, timestamp DESC)` for service-filtered recent-log queries.
 - `(level, timestamp DESC)` for level-filtered recent-log queries.
 - `GIN (attributes jsonb_path_ops)` for JSONB attribute storage.
+- Expression indexes on `attributes ->> 'user_id'`, `attributes ->> 'region'`, and `attributes ->> 'request_id'` for common attribute filters used by query and aggregation workloads.
 - `GIN (message gin_trgm_ops)` for case-insensitive substring search with `ILIKE`.
 - `log_rollups_minute` and `log_rollups_hour` store pre-aggregated counts by bucket, service, and level for the required aggregation endpoint.
+
+## Architecture
+
+The service uses a CQRS-style split:
+
+- Command side: ingestion uses `writePool` and PostgreSQL `COPY FROM STDIN` for high-throughput writes.
+- Query side: log search and aggregation use `readPool`, which can point to the primary database locally or a read replica in a larger deployment.
+- Background workers: rollup processing runs outside the request path and keeps the aggregation tables warm.
+
+`POST /logs` validates each entry and writes accepted rows with `rollup_processed=false`. Ingestion requests are briefly coalesced in memory, up to `INGEST_FLUSH_INTERVAL_MS` or `INGEST_FLUSH_MAX_LOGS`, so many small concurrent requests can become one database write. Small flushed batches use a compact multi-row `INSERT` to avoid COPY setup overhead. Larger flushed batches use `COPY FROM STDIN` for higher write throughput. A background rollup worker processes pending rows in large batches with `FOR UPDATE SKIP LOCKED`, updates minute/hour rollup tables, and marks rows processed. Aggregation combines rollup rows with any still-pending raw rows, so newly ingested logs remain visible before the worker catches up.
 
 ## Attribute Storage Strategy
 
 Attributes are stored as `JSONB` because each service can send different keys. The API enforces a flat object with primitive values only. Query filters use `attributes ->> key = value`, so comparisons follow the project requirement: attribute equality is compared as strings.
 
-This keeps ingestion simple and flexible while preserving the option to add expression indexes later for hot attributes such as `user_id`, `request_id`, or `region`.
+This keeps ingestion flexible while expression indexes cover hot attributes such as `user_id`, `request_id`, and `region`. The query builder emits constant expressions for those hot keys so PostgreSQL can use the matching indexes.
 
 ## Retention Strategy
 
@@ -227,7 +239,7 @@ LOAD_TEST_OUTPUT=load-results.json
 
 The script ingests logs through `POST /logs`, sends one aggregation request per second during ingestion, and writes measured ingestion throughput plus aggregation p50/p95/p99 to `load-results.json`.
 
-Measured local run:
+Most recent measured local run before COPY-based ingestion and asynchronous rollups:
 
 - Test date: 2026-08-17
 - Environment: Windows x64 host, Docker Compose app + PostgreSQL, Node.js v24.13.0 for the load generator
@@ -249,11 +261,11 @@ Bottlenecks and optimizations:
 - Initial raw-table aggregation over 1,000,000 rows measured p95 3,096.08 ms, which missed the 1 second target.
 - Adding minute rollups reduced aggregation p95 to 1,045.57 ms.
 - Adding hour rollups reduced aggregation p95 to 784.97 ms for the primary 1-hour aggregation query.
-- Ingestion throughput is below the 15,000 logs/sec target in this local environment. The main write-side cost is maintaining raw-log indexes plus minute/hour rollup upserts on every batch.
+- COPY-based ingestion, short in-memory ingest batching, faster asynchronous rollup batches, and expression indexes for hot attributes were added after this measurement. Re-run `npm run load:test` to collect the updated ingestion numbers for your machine.
 
 ## Known Limitations
 
 - Daily partitions are prepared for the previous 30 days through the next two days; far-future accepted timestamps go to the default partition.
 - Rollups accelerate service/level time-bucket aggregations, but queries with `q` or `attr.<key>` fall back to raw logs for correctness.
 - No authentication optional mode is implemented.
-- Local ingestion throughput did not reach the 15,000 logs/sec target. Next improvements would be COPY-based ingestion, fewer write-time indexes, asynchronous rollup workers, or partition-local tuning.
+- COPY-based ingestion, short in-memory ingest batching, and faster asynchronous rollups reduce request-path write cost, but the latest 1,000,000-row load test should be re-run after this change and recorded here.

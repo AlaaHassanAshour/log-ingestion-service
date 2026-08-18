@@ -1,4 +1,3 @@
-import pg from 'pg';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -34,17 +33,30 @@ const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const pool = writePool;
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function initDb() {
-  const client = await pool.connect();
-  try {
-    const schemaPath = path.join(dirname, 'schema.sql');
-    const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    await client.query(schemaSql);
-    console.log('✅ Database schema and partitions initialized successfully.');
-  } catch (error) {
-    console.error('❌ Error initializing database schema:', error);
-    throw error;
-  } finally {
-    client.release();
+  const schemaPath = path.join(dirname, 'schema.sql');
+  const schemaSql = fs.readFileSync(schemaPath, 'utf8');
+  const maxAttempts = Number(process.env.DB_INIT_ATTEMPTS ?? 30);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let client;
+    try {
+      client = await pool.connect();
+      await client.query(schemaSql);
+      console.log('✅ Database schema and partitions initialized successfully.');
+      return;
+    } catch (error) {
+      if (attempt === maxAttempts) {
+        console.error('❌ Error initializing database schema:', error);
+        throw error;
+      }
+      await sleep(500);
+    } finally {
+      client?.release();
+    }
   }
 }
