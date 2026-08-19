@@ -1,7 +1,7 @@
 import { writePool } from '../db/index.js';
 
-const DEFAULT_BATCH_SIZE = 50000;
-const DEFAULT_INTERVAL_MS = 100;
+const DEFAULT_BATCH_SIZE = 5000;
+const DEFAULT_INTERVAL_MS = 1000;
 
 function rollupBatchSize() {
   const parsed = Number(process.env.ROLLUP_BATCH_SIZE ?? DEFAULT_BATCH_SIZE);
