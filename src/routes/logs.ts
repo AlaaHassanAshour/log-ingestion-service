@@ -267,12 +267,37 @@ function addFilterSql(filters: QueryFilters, values: unknown[], conditions: stri
   }
 }
 
-function canUseMinuteRollup(filters: QueryFilters) {
-  return !filters.q && Object.keys(filters.attributes).length === 0;
+function isRollupAligned(value: string | undefined, bucket: string) {
+  if (!value) {
+    return false;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getUTCSeconds() !== 0 || date.getUTCMilliseconds() !== 0) {
+    return false;
+  }
+
+  if (bucket === '1m') {
+    return true;
+  }
+  if (bucket === '5m') {
+    return date.getUTCMinutes() % 5 === 0;
+  }
+  if (bucket === '1h') {
+    return date.getUTCMinutes() === 0;
+  }
+  return date.getUTCHours() === 0 && date.getUTCMinutes() === 0;
+}
+
+function canUseMinuteRollup(filters: QueryFilters, bucket: string) {
+  return !filters.q
+    && Object.keys(filters.attributes).length === 0
+    && isRollupAligned(filters.since, bucket)
+    && isRollupAligned(filters.until, bucket);
 }
 
 function aggregateSourceTable(filters: QueryFilters, bucket: string) {
-  if (!canUseMinuteRollup(filters)) {
+  if (!canUseMinuteRollup(filters, bucket)) {
     return 'logs';
   }
 
